@@ -1,235 +1,302 @@
-import React from 'react';
+import React, { useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
-  ArrowUpRight,
+  Archive,
   CheckCircle2,
-  Circle,
+  ChevronLeft,
+  ChevronRight,
+  CircleDot,
   Clock3,
-  GitBranch,
-  MinusCircle,
+  Columns3,
+  FolderKanban,
+  GripVertical,
+  ListTodo,
+  MessageSquare,
+  PanelLeft,
+  Plus,
+  RefreshCcw,
+  Search,
   Sparkles,
 } from 'lucide-react';
-import {
-  commands,
-  dashboardMeta,
-  navItems,
-  projects,
-  recentWins,
-  signals,
-  stateIcon,
-  tasks,
-  type Project,
-  type Task,
-  type Tone,
-} from './data';
+import { commands, dashboardMeta, projects, tasks, type Command, type Project, type Task } from './data';
 import './styles.css';
 
-const toneClass = (tone: Tone) => `tone-${tone}`;
+type BoardKey = 'projects' | 'tasks' | 'commands';
+type CardKind = 'project' | 'task' | 'command';
+type DragPayload = { kind: CardKind; id: string };
+
+type BoardCard = {
+  id: string;
+  kind: CardKind;
+  title: string;
+  eyebrow: string;
+  description: string;
+  meta?: string;
+  sourceState: string;
+};
+
+type Column = {
+  id: string;
+  title: string;
+  hint: string;
+  icon: React.ComponentType<{ size?: number }>;
+};
+
+const projectColumns: Column[] = [
+  { id: 'active', title: 'Active', hint: 'Work that is alive now', icon: CircleDot },
+  { id: 'scheduled', title: 'Scheduled / Tested', hint: 'Running systems and validated flows', icon: Clock3 },
+  { id: 'complete', title: 'Complete', hint: 'Shipped or stable v1s', icon: CheckCircle2 },
+  { id: 'parked', title: 'Parked', hint: 'Intentionally paused', icon: Archive },
+];
+
+const taskColumns: Column[] = [
+  { id: 'now', title: 'Now', hint: 'Small next actions', icon: CircleDot },
+  { id: 'waiting', title: 'Waiting', hint: 'Needs signal or feedback', icon: Clock3 },
+  { id: 'done', title: 'Done', hint: 'Recent wins', icon: CheckCircle2 },
+];
+
+const commandColumns: Column[] = [
+  { id: 'DM', title: 'DM', hint: 'Personal commands', icon: MessageSquare },
+  { id: 'News', title: 'News', hint: '#semi-news workflows', icon: Columns3 },
+  { id: 'Site', title: 'Site', hint: '#semi-personal-site', icon: FolderKanban },
+  { id: 'Discord', title: 'Discord', hint: 'Channel operations', icon: PanelLeft },
+];
+
+function projectToCard(project: Project): BoardCard {
+  return {
+    id: `project:${project.id}`,
+    kind: 'project',
+    title: project.title,
+    eyebrow: project.status,
+    description: project.description,
+    meta: `Next: ${project.next}`,
+    sourceState: project.state === 'tested' ? 'scheduled' : project.state,
+  };
+}
+
+function taskToCard(task: Task, index: number): BoardCard {
+  return {
+    id: `task:${index}:${task.title}`,
+    kind: 'task',
+    title: task.title,
+    eyebrow: task.state,
+    description: task.detail ?? 'No extra detail yet.',
+    sourceState: task.state,
+  };
+}
+
+function commandToCard(command: Command): BoardCard {
+  return {
+    id: `command:${command.scope}:${command.phrase}`,
+    kind: 'command',
+    title: command.phrase,
+    eyebrow: command.scope,
+    description: command.description,
+    sourceState: command.scope,
+  };
+}
+
+function createInitialBoard(cards: BoardCard[], columns: Column[]) {
+  const board = Object.fromEntries(columns.map((column) => [column.id, [] as string[]]));
+  const cardMap: Record<string, BoardCard> = {};
+  for (const card of cards) {
+    cardMap[card.id] = card;
+    const column = board[card.sourceState] ? card.sourceState : columns[0].id;
+    board[column].push(card.id);
+  }
+  return { board, cardMap };
+}
 
 function App() {
-  const activeProjects = projects.filter((project) => project.state !== 'parked');
-  const parkedProjects = projects.filter((project) => project.state === 'parked');
-  const nowTasks = tasks.filter((task) => task.state === 'now');
-  const waitingTasks = tasks.filter((task) => task.state === 'waiting');
-  const doneTasks = tasks.filter((task) => task.state === 'done');
+  const [activeBoard, setActiveBoard] = useState<BoardKey>('projects');
+  const [query, setQuery] = useState('');
+
+  const initial = useMemo(() => ({
+    projects: createInitialBoard(projects.map(projectToCard), projectColumns),
+    tasks: createInitialBoard(tasks.map(taskToCard), taskColumns),
+    commands: createInitialBoard(commands.map(commandToCard), commandColumns),
+  }), []);
+
+  const [boards, setBoards] = useState(initial);
+  const [dragging, setDragging] = useState<DragPayload | null>(null);
+
+  const activeConfig = {
+    projects: { title: 'Projects', subtitle: 'A Trello-style view of everything Semi and Kosta are building.', columns: projectColumns },
+    tasks: { title: 'Tasks', subtitle: 'Move cards as priorities change. This is local UI state for now.', columns: taskColumns },
+    commands: { title: 'Commands', subtitle: 'Natural language controls grouped by where they are useful.', columns: commandColumns },
+  }[activeBoard];
+
+  const current = boards[activeBoard];
+  const visibleCard = (card: BoardCard) => {
+    if (!query.trim()) return true;
+    const haystack = `${card.title} ${card.eyebrow} ${card.description} ${card.meta ?? ''}`.toLowerCase();
+    return haystack.includes(query.toLowerCase());
+  };
+
+  function moveCard(cardId: string, targetColumn: string, beforeId?: string) {
+    setBoards((previous) => {
+      const nextBoard = structuredClone(previous[activeBoard].board) as Record<string, string[]>;
+      for (const column of Object.keys(nextBoard)) {
+        nextBoard[column] = nextBoard[column].filter((id) => id !== cardId);
+      }
+      const targetCards = nextBoard[targetColumn] ?? [];
+      if (beforeId && targetCards.includes(beforeId)) {
+        const index = targetCards.indexOf(beforeId);
+        targetCards.splice(index, 0, cardId);
+      } else {
+        targetCards.push(cardId);
+      }
+      nextBoard[targetColumn] = targetCards;
+      return {
+        ...previous,
+        [activeBoard]: { ...previous[activeBoard], board: nextBoard },
+      };
+    });
+  }
+
+  function moveByButton(cardId: string, direction: -1 | 1) {
+    const columns = activeConfig.columns.map((column) => column.id);
+    const currentColumn = columns.find((column) => current.board[column]?.includes(cardId));
+    if (!currentColumn) return;
+    const currentIndex = columns.indexOf(currentColumn);
+    const target = columns[currentIndex + direction];
+    if (target) moveCard(cardId, target);
+  }
+
+  function resetBoard() {
+    setBoards((previous) => ({ ...previous, [activeBoard]: initial[activeBoard] }));
+  }
 
   return (
     <div className="app-shell">
-      <aside className="sidebar" aria-label="Semi Dashboard navigation">
+      <aside className="sidebar" aria-label="Dashboard menu">
         <a className="brand" href="#top" aria-label="Semi Dashboard home">
           <span className="brand-mark">◆</span>
           <span>
             <strong>Semi</strong>
-            <small>Dashboard</small>
+            <small>Board</small>
           </span>
         </a>
-        <nav>
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            return (
-              <a key={item.href} href={item.href}>
-                <Icon size={17} />
-                {item.label}
-              </a>
-            );
-          })}
+
+        <nav className="board-menu" aria-label="Boards">
+          <button className={activeBoard === 'projects' ? 'active' : ''} onClick={() => setActiveBoard('projects')}>
+            <FolderKanban size={18} /> Projects
+          </button>
+          <button className={activeBoard === 'tasks' ? 'active' : ''} onClick={() => setActiveBoard('tasks')}>
+            <ListTodo size={18} /> Tasks
+          </button>
+          <button className={activeBoard === 'commands' ? 'active' : ''} onClick={() => setActiveBoard('commands')}>
+            <Sparkles size={18} /> Commands
+          </button>
         </nav>
-        <div className="sidebar-card">
-          <p className="eyebrow">Mode</p>
-          <p>Quiet by default. Useful when needed.</p>
+
+        <div className="sidebar-footer">
+          <p>Generated from Semi state</p>
+          <span>{new Date(dashboardMeta.generatedAt).toLocaleString()}</span>
         </div>
       </aside>
 
-      <main id="top">
-        <Hero />
-
-        <section id="overview" className="section overview-grid" aria-labelledby="overview-title">
-          <div className="section-heading compact">
-            <p className="eyebrow">Overview</p>
-            <h2 id="overview-title">What matters right now</h2>
+      <main id="top" className="board-page">
+        <header className="topbar">
+          <div>
+            <p className="eyebrow">Kosta × Semi</p>
+            <h1>{activeConfig.title}</h1>
+            <p>{activeConfig.subtitle}</p>
           </div>
-          <Metric label="Active systems" value={String(activeProjects.length)} detail="running or ready" />
-          <Metric label="Open tasks" value={String(nowTasks.length)} detail="current next actions" />
-          <Metric label="Waiting" value={String(waitingTasks.length)} detail="needs signal/feedback" />
-          <Metric label="Parked" value={String(parkedProjects.length)} detail="intentionally paused" />
-        </section>
+          <div className="topbar-actions">
+            <label className="search-box">
+              <Search size={17} />
+              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search cards" />
+            </label>
+            <button className="soft-button" onClick={resetBoard}>
+              <RefreshCcw size={17} /> Reset
+            </button>
+          </div>
+        </header>
 
-        <section id="signals" className="section" aria-labelledby="signals-title">
-          <SectionHeading eyebrow="Signals" title="System health at a glance" subtitle="The dashboard starts as static product UI, backed by Semi's current command-center state." />
-          <div className="signal-grid">
-            {signals.map((signal) => {
-              const Icon = signal.icon;
-              return (
-                <article key={signal.label} className={`signal-card ${toneClass(signal.tone)}`}>
-                  <div className="icon-pill"><Icon size={20} /></div>
+        <section className="board" aria-label={`${activeConfig.title} board`}>
+          {activeConfig.columns.map((column) => {
+            const Icon = column.icon;
+            const cardIds = current.board[column.id] ?? [];
+            const cards = cardIds.map((id) => current.cardMap[id]).filter(Boolean).filter(visibleCard);
+            return (
+              <div
+                key={column.id}
+                className="list"
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  const payload = readDragPayload(event) ?? dragging;
+                  if (payload) moveCard(payload.id, column.id);
+                  setDragging(null);
+                }}
+              >
+                <div className="list-header">
                   <div>
-                    <p className="signal-label">{signal.label}</p>
-                    <h3>{signal.value}</h3>
-                    <p>{signal.detail}</p>
+                    <h2><Icon size={18} /> {column.title}</h2>
+                    <p>{column.hint}</p>
                   </div>
-                </article>
-              );
-            })}
-          </div>
-        </section>
-
-        <section id="projects" className="section" aria-labelledby="projects-title">
-          <SectionHeading eyebrow="Projects" title="Shared workbench" subtitle="Semi and Kosta's active systems, parked work, and next useful moves." />
-          <div className="project-grid">
-            {projects.map((project) => <ProjectCard key={project.id} project={project} />)}
-          </div>
-        </section>
-
-        <section id="tasks" className="section two-column" aria-labelledby="tasks-title">
-          <div>
-            <SectionHeading eyebrow="Tasks" title="Next actions" subtitle="Small enough to act on, visible enough to not lose." />
-            <TaskList title="Now" tasks={nowTasks} icon="now" />
-            <TaskList title="Waiting" tasks={waitingTasks} icon="waiting" />
-          </div>
-          <div className="done-panel">
-            <TaskList title="Recent wins" tasks={doneTasks.slice(-6).reverse()} icon="done" />
-          </div>
-        </section>
-
-        <section id="commands" className="section" aria-labelledby="commands-title">
-          <SectionHeading eyebrow="Commands" title="Natural-language controls" subtitle="No rigid slash-command ceremony. Say these normally in Discord." />
-          <div className="command-grid">
-            {commands.map((command) => (
-              <article key={command.phrase} className="command-card">
-                <div>
-                  <code>{command.phrase}</code>
-                  <p>{command.description}</p>
+                  <span>{cards.length}</span>
                 </div>
-                <span>{command.scope}</span>
-              </article>
-            ))}
-          </div>
-        </section>
 
-        <section id="notes" className="section notes" aria-labelledby="notes-title">
-          <div>
-            <p className="eyebrow">Product direction</p>
-            <h2 id="notes-title">From markdown to product</h2>
-            <p>
-              v1 is intentionally simple: a polished dashboard with a real sync foundation.
-              Dashboard content is now generated into a typed content module, so Semi can refresh the UI from command-center state instead of hand-editing cards.
-            </p>
-            <p className="sync-meta">
-              Data source: <strong>{dashboardMeta.source}</strong><br />
-              Generated: <strong>{new Date(dashboardMeta.generatedAt).toLocaleString()}</strong>
-            </p>
-            <div className="note-actions">
-              <a href="https://github.com/kostadinkadiev/semi-dashboard" target="_blank" rel="noreferrer">
-                <GitBranch size={18} /> GitHub repo <ArrowUpRight size={16} />
-              </a>
-            </div>
-          </div>
-          <div className="wins-card">
-            <h3>Recent wins</h3>
-            <ul>
-              {recentWins.map((win) => <li key={win}>{win}</li>)}
-            </ul>
-          </div>
+                <div className="cards">
+                  {cards.map((card) => (
+                    <article
+                      key={card.id}
+                      className={`card card-${card.kind}`}
+                      draggable
+                      onDragStart={(event) => {
+                        const payload = { kind: card.kind, id: card.id } satisfies DragPayload;
+                        setDragging(payload);
+                        event.dataTransfer.effectAllowed = 'move';
+                        event.dataTransfer.setData('application/json', JSON.stringify(payload));
+                      }}
+                      onDragEnd={() => setDragging(null)}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        const payload = readDragPayload(event) ?? dragging;
+                        if (payload && payload.id !== card.id) moveCard(payload.id, column.id, card.id);
+                        setDragging(null);
+                      }}
+                    >
+                      <div className="card-grip"><GripVertical size={16} /></div>
+                      <div className="card-body">
+                        <div className="card-topline">
+                          <span>{card.eyebrow}</span>
+                          <div className="card-movers" aria-label="Move card buttons">
+                            <button onClick={() => moveByButton(card.id, -1)} aria-label="Move left"><ChevronLeft size={15} /></button>
+                            <button onClick={() => moveByButton(card.id, 1)} aria-label="Move right"><ChevronRight size={15} /></button>
+                          </div>
+                        </div>
+                        <h3>{card.title}</h3>
+                        <p>{card.description}</p>
+                        {card.meta ? <small>{card.meta}</small> : null}
+                      </div>
+                    </article>
+                  ))}
+                  <button className="add-card" type="button">
+                    <Plus size={16} /> Add card later
+                  </button>
+                </div>
+              </div>
+            );
+          })}
         </section>
       </main>
     </div>
   );
 }
 
-function Hero() {
-  return (
-    <header className="hero">
-      <div className="hero-orb" />
-      <p className="eyebrow">Kosta × Semi</p>
-      <h1>A shared command center for projects, briefings, tasks, and quiet automation.</h1>
-      <p className="hero-copy">
-        Semi Dashboard turns our working memory into a product: focused enough for daily use,
-        flexible enough to grow with the way we actually work.
-      </p>
-      <div className="hero-actions">
-        <a href="#projects">View projects</a>
-        <a href="#commands" className="secondary">Command menu</a>
-      </div>
-    </header>
-  );
-}
-
-function Metric({ label, value, detail }: { label: string; value: string; detail: string }) {
-  return (
-    <article className="metric-card">
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <small>{detail}</small>
-    </article>
-  );
-}
-
-function SectionHeading({ eyebrow, title, subtitle }: { eyebrow: string; title: string; subtitle: string }) {
-  return (
-    <div className="section-heading">
-      <p className="eyebrow">{eyebrow}</p>
-      <h2>{title}</h2>
-      <p>{subtitle}</p>
-    </div>
-  );
-}
-
-function ProjectCard({ project }: { project: Project }) {
-  const Icon = project.icon;
-  const StateIcon = stateIcon[project.state];
-  return (
-    <article className={`project-card ${toneClass(project.tone)}`}>
-      <div className="project-topline">
-        <div className="icon-pill"><Icon size={21} /></div>
-        <span className={`status status-${project.state}`}><StateIcon size={14} /> {project.status}</span>
-      </div>
-      <h3>{project.title}</h3>
-      <p>{project.description}</p>
-      <div className="next-box">
-        <span>Next</span>
-        <p>{project.next}</p>
-      </div>
-    </article>
-  );
-}
-
-function TaskList({ title, tasks: list, icon }: { title: string; tasks: Task[]; icon: 'now' | 'waiting' | 'done' }) {
-  const Icon = icon === 'done' ? CheckCircle2 : icon === 'waiting' ? Clock3 : Circle;
-  return (
-    <div className="task-list">
-      <h3><Icon size={18} /> {title}</h3>
-      {list.length === 0 ? <p className="empty">Nothing here.</p> : null}
-      {list.map((task) => (
-        <article key={`${title}-${task.title}`} className={`task-row task-${task.state}`}>
-          <div>
-            <strong>{task.title}</strong>
-            {task.detail ? <p>{task.detail}</p> : null}
-          </div>
-          {task.state === 'waiting' ? <MinusCircle size={18} /> : <CheckCircle2 size={18} />}
-        </article>
-      ))}
-    </div>
-  );
+function readDragPayload(event: React.DragEvent): DragPayload | null {
+  try {
+    const raw = event.dataTransfer.getData('application/json');
+    if (!raw) return null;
+    return JSON.parse(raw) as DragPayload;
+  } catch {
+    return null;
+  }
 }
 
 createRoot(document.getElementById('root')!).render(
