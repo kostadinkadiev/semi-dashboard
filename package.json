@@ -6,6 +6,7 @@
   "description": "A lightweight command center dashboard for Semi and Kosta.",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
+    "sync:data": "node scripts/sync-dashboard-data.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0",
     "lint": "tsc -b --pretty false"

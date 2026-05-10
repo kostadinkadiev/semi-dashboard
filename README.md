@@ -35,4 +35,19 @@ npm run build
 
 ## Notes
 
-v1 uses static seed data extracted from Semi's command-center files. Later versions can read from a JSON export, GitHub issues, local API, or OpenClaw-generated artifacts.
+v1.1 uses a typed generated content module extracted from Semi's command-center files.
+
+## Sync Dashboard Data
+
+From this repo:
+
+```bash
+npm run sync:data
+npm run build
+```
+
+The sync script reads local command-center files from the parent workspace and regenerates `src/content.ts`.
+
+## Roadmap
+
+See `ROADMAP.md`.
