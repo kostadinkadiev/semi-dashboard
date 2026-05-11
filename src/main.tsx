@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Archive,
@@ -35,6 +35,9 @@ type BoardCard = {
   sourceState: string;
 };
 
+type BoardState = ReturnType<typeof createInitialBoard>;
+type BoardsState = Record<BoardKey, BoardState>;
+
 type Column = {
   id: string;
   title: string;
@@ -61,6 +64,8 @@ const commandColumns: Column[] = [
   { id: 'Site', title: 'Site', hint: '#semi-personal-site', icon: FolderKanban },
   { id: 'Discord', title: 'Discord', hint: 'Channel operations', icon: PanelLeft },
 ];
+
+const STORAGE_KEY = 'semi-dashboard.board-state.v1';
 
 function projectToCard(project: Project): BoardCard {
   return {
@@ -107,22 +112,87 @@ function createInitialBoard(cards: BoardCard[], columns: Column[]) {
   return { board, cardMap };
 }
 
+function createInitialBoards() {
+  return {
+    projects: createInitialBoard(projects.map(projectToCard), projectColumns),
+    tasks: createInitialBoard(tasks.map(taskToCard), taskColumns),
+    commands: createInitialBoard(commands.map(commandToCard), commandColumns),
+  } satisfies BoardsState;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function mergeStoredBoard(fresh: BoardState, stored: unknown): BoardState {
+  if (!isObject(stored)) return fresh;
+
+  const storedBoard = stored.board;
+  if (!isObject(storedBoard)) return fresh;
+
+  const freshCardIds = new Set(Object.keys(fresh.cardMap));
+  const placedCardIds = new Set<string>();
+  const board = Object.fromEntries(Object.keys(fresh.board).map((columnId) => [columnId, [] as string[]]));
+
+  for (const columnId of Object.keys(board)) {
+    const savedColumn = storedBoard[columnId];
+    if (!Array.isArray(savedColumn)) continue;
+
+    for (const cardId of savedColumn) {
+      if (typeof cardId !== 'string' || !freshCardIds.has(cardId) || placedCardIds.has(cardId)) continue;
+      board[columnId].push(cardId);
+      placedCardIds.add(cardId);
+    }
+  }
+
+  for (const [columnId, cardIds] of Object.entries(fresh.board)) {
+    for (const cardId of cardIds) {
+      if (!placedCardIds.has(cardId)) board[columnId].push(cardId);
+    }
+  }
+
+  return { ...fresh, board };
+}
+
+function restoreBoards(fresh: BoardsState): BoardsState {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return fresh;
+    const saved = JSON.parse(raw) as unknown;
+    if (!isObject(saved)) return fresh;
+
+    return {
+      projects: mergeStoredBoard(fresh.projects, saved.projects),
+      tasks: mergeStoredBoard(fresh.tasks, saved.tasks),
+      commands: mergeStoredBoard(fresh.commands, saved.commands),
+    } satisfies BoardsState;
+  } catch {
+    return fresh;
+  }
+}
+
+function boardOrderForStorage(boards: BoardsState) {
+  return Object.fromEntries(
+    Object.entries(boards).map(([key, value]) => [key, { board: value.board }]),
+  );
+}
+
 function App() {
   const [activeBoard, setActiveBoard] = useState<BoardKey>('projects');
   const [query, setQuery] = useState('');
 
-  const initial = useMemo(() => ({
-    projects: createInitialBoard(projects.map(projectToCard), projectColumns),
-    tasks: createInitialBoard(tasks.map(taskToCard), taskColumns),
-    commands: createInitialBoard(commands.map(commandToCard), commandColumns),
-  }), []);
+  const initial = useMemo(createInitialBoards, []);
 
-  const [boards, setBoards] = useState(initial);
+  const [boards, setBoards] = useState<BoardsState>(() => restoreBoards(initial));
   const [dragging, setDragging] = useState<DragPayload | null>(null);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(boardOrderForStorage(boards)));
+  }, [boards]);
 
   const activeConfig = {
     projects: { title: 'Projects', subtitle: 'A Trello-style view of everything Semi and Kosta are building.', columns: projectColumns },
-    tasks: { title: 'Tasks', subtitle: 'Move cards as priorities change. This is local UI state for now.', columns: taskColumns },
+    tasks: { title: 'Tasks', subtitle: 'Move cards as priorities change. Your board order is saved in this browser.', columns: taskColumns },
     commands: { title: 'Commands', subtitle: 'Natural language controls grouped by where they are useful.', columns: commandColumns },
   }[activeBoard];
 
